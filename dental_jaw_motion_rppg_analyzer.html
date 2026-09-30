@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TMJ-Motion & Bio-Tracker | 顎運動・自律神経動態解析システム</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MediaPipe Face Mesh & Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <!-- Chart.js for trajectory and biometric plotting -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #1e293b;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #475569;
+      border-radius: 3px;
+    }
+    .hud-grid {
+      background-size: 20px 20px;
+      background-image: 
+        linear-gradient(to right, rgba(56, 189, 248, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(56, 189, 248, 0.05) 1px, transparent 1px);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col antialiased selection:bg-cyan-500 selection:text-white">
+
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50 px-4 py-2.5 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+        </svg>
+      </div>
+      <div>
+        <div class="flex items-center space-x-2">
+          <h1 class="text-base font-bold tracking-tight text-white">TMJ-Motion & Bio-Tracker</h1>
+          <span class="text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800">Non-Medical / Educational</span>
+        </div>
+        <p class="text-xs text-slate-400">単眼RGB開口運動幾何追従 ＆ 遠隔容積脈波（rPPG）解析プロトタイプ</p>
+      </div>
+    </div>
+
+    <!-- Right header action items -->
+    <div class="flex items-center space-x-3">
+      <!-- Protocol Indicator -->
+      <div class="hidden md:flex items-center space-x-2 px-3 py-1 rounded-md bg-slate-800/80 border border-slate-700 text-xs">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="text-slate-300">推奨プロトコル: <strong class="text-cyan-300">端座位・自然頭位</strong></span>
+      </div>
+
+      <!-- Mode selection: Frontal vs Sagittal -->
+      <div class="inline-flex rounded-lg bg-slate-800 p-0.5 border border-slate-700">
+        <button id="btnViewFrontal" class="px-3 py-1.5 text-xs font-medium rounded-md bg-cyan-600 text-white shadow-sm transition">正面観 (Frontal)</button>
+        <button id="btnViewSagittal" class="px-3 py-1.5 text-xs font-medium rounded-md text-slate-400 hover:text-white transition">側面観 (Sagittal)</button>
+      </div>
+
+      <!-- Record/Reset buttons -->
+      <button id="btnRecordToggle" class="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs flex items-center space-x-1.5 shadow-md shadow-rose-900/30 transition">
+        <span id="recordLed" class="w-2 h-2 rounded-full bg-white"></span>
+        <span id="recordLabel">記録開始</span>
+      </button>
+      <button id="btnResetTrack" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition">
+        軌跡消去
+      </button>
+    </div>
+  </header>
+
+  <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 max-w-[1920px] w-full mx-auto overflow-hidden">
+    
+    <!-- LEFT PANEL: Video Stream, Face HUD Overlay & Live Biofeedback (7 cols) -->
+    <section class="lg:col-span-7 flex flex-col space-y-3">
+      <div class="relative bg-slate-900 rounded-xl border border-slate-800 overflow-hidden shadow-2xl flex-1 min-h-[460px] flex items-center justify-center hud-grid">
+        
+        <!-- Raw video element (hidden, rendered onto canvas) -->
+        <video id="inputVideo" class="hidden" playsinline></video>
+
+        <!-- Overlay Canvas for mesh, axes, trajectory, and HUD -->
+        <canvas id="outputCanvas" class="w-full h-full object-contain cursor-crosshair"></canvas>
+
+        <!-- Top HUD Floating Pill -->
+        <div class="absolute top-3 left-3 flex flex-wrap items-center gap-2 pointer-events-none">
+          <div class="px-2.5 py-1 rounded-md bg-slate-900/85 backdrop-blur border border-slate-700/80 text-[11px] font-mono text-cyan-300 flex items-center space-x-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+            <span id="hudFps">FPS: --</span>
+          </div>
+          <div class="px-2.5 py-1 rounded-md bg-slate-900/85 backdrop-blur border border-slate-700/80 text-[11px] font-mono text-amber-300 flex items-center space-x-1.5">
+            <span id="hudScale">Scale: -- px/mm</span>
+          </div>
+          <div id="hudHeadTilt" class="px-2.5 py-1 rounded-md bg-slate-900/85 backdrop-blur border border-slate-700/80 text-[11px] font-mono text-emerald-300">
+            Head Tilt: 0.0°
+          </div>
+        </div>
+
+        <!-- Top Right: Biofeedback Target Guidance Badge -->
+        <div class="absolute top-3 right-3 pointer-events-auto">
+          <label class="flex items-center space-x-2 px-2.5 py-1.5 rounded-lg bg-slate-900/90 backdrop-blur border border-slate-700 text-xs cursor-pointer hover:border-cyan-500 transition">
+            <input type="checkbox" id="checkBiofeedback" class="w-3.5 h-3.5 rounded text-cyan-500 focus:ring-0 bg-slate-800 border-slate-600" checked>
+            <span class="text-slate-200 text-xs">正中開口ガイド表示</span>
+          </label>
+        </div>
+
+        <!-- rPPG Pulse Wave Mini Overlay in HUD bottom-left -->
+        <div class="absolute bottom-3 left-3 w-56 p-2 rounded-lg bg-slate-950/85 backdrop-blur border border-slate-800/90 shadow-lg pointer-events-none">
+          <div class="flex items-center justify-between text-[10px] text-slate-400 mb-1">
+            <span class="flex items-center gap-1 font-semibold text-rose-400">
+              <span class="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping"></span> rPPG 前額脈波
+            </span>
+            <span id="hudBpm" class="font-mono text-white font-bold text-xs">-- BPM</span>
+          </div>
+          <canvas id="rppgMiniCanvas" width="210" height="38" class="w-full h-9 bg-slate-900/60 rounded border border-slate-800"></canvas>
+        </div>
+
+        <!-- Camera Loading, Permission, or Error State -->
+        <div id="loadingOverlay" class="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center z-20 p-6 text-center space-y-3">
+          <div id="loadingSpinner" class="w-10 h-10 border-3 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+          <div id="cameraStatusIcon" class="hidden w-12 h-12 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+            </svg>
+          </div>
+          <p id="loadingTitle" class="text-sm font-semibold text-slate-200">カメラの起動を待機中...</p>
+          <p id="loadingDesc" class="text-xs text-slate-400 max-w-xs">ブラウザのカメラアクセスを許可してください。自動起動しなかった場合は下のボタンを押してください。</p>
+          <button id="btnStartCamera" class="mt-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-cyan-900/40 transition">
+            カメラを起動する
+          </button>
+        </div>
+
+        <!-- In-app Toast Notification Container -->
+        <div id="toastBox" class="hidden absolute top-14 left-1/2 transform -translate-x-1/2 z-30 px-4 py-2 bg-slate-900/95 border border-amber-500/80 rounded-lg shadow-2xl text-xs text-amber-200 flex items-center space-x-2 transition-opacity duration-300">
+          <svg class="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          <span id="toastMsg">通知メッセージ</span>
+        </div>
+      </div>
+
+      <!-- Quick Controls & Calibration Bar below camera -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div class="flex items-center space-x-3">
+          <span class="font-medium text-slate-400">追従点 (ROI):</span>
+          <select id="selectTrackingPoint" class="bg-slate-800 border border-slate-700 text-slate-200 rounded px-2.5 py-1 text-xs focus:ring-1 focus:ring-cyan-500 focus:outline-none">
+            <option value="152" selected>オトガイ点 (Gnathion / 顎下端: #152)</option>
+            <option value="17">下唇中央下縁 (切歯点代用: #17)</option>
+            <option value="61">右口角 (Cheilion R: #61)</option>
+            <option value="291">左口角 (Cheilion L: #291)</option>
+            <option value="custom">任意インデックス指定...</option>
+          </select>
+          <input type="number" id="inputCustomPoint" placeholder="ID (0-467)" min="0" max="467" class="hidden w-20 bg-slate-800 border border-slate-700 text-slate-200 rounded px-2 py-1 text-xs text-center">
+        </div>
+
+        <!-- Scale Calibration (IPD-based) -->
+        <div class="flex items-center space-x-2">
+          <span class="text-slate-400">基準瞳孔間距離 (IPD):</span>
+          <input type="number" id="inputIpdMm" value="63.0" step="0.5" min="40" max="80" class="w-16 bg-slate-800 border border-slate-700 text-slate-200 rounded px-2 py-1 text-xs text-center font-mono">
+          <span class="text-slate-400">mm</span>
+          <button id="btnCalibrate" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 transition">再補正</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Analytical Graphs, Quantitative Metrics & Biometrics (5 cols) -->
+    <section class="lg:col-span-5 flex flex-col space-y-3 overflow-y-auto">
+      
+      <!-- Key Quantitative Metrics Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex flex-col">
+          <span class="text-[11px] text-slate-400 font-medium">開口距離 (垂直)</span>
+          <div class="flex items-baseline space-x-1 mt-1">
+            <span id="metricVerticalDisp" class="text-2xl font-bold font-mono text-cyan-400">0.0</span>
+            <span class="text-xs text-slate-500">mm</span>
+          </div>
+          <span class="text-[10px] text-slate-500 mt-0.5" id="metricVerticalMax">Max: 0.0 mm</span>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex flex-col">
+          <span class="text-[11px] text-slate-400 font-medium">左右偏位量 (X幅)</span>
+          <div class="flex items-baseline space-x-1 mt-1">
+            <span id="metricDeviation" class="text-2xl font-bold font-mono text-amber-400">0.0</span>
+            <span class="text-xs text-slate-500">mm</span>
+          </div>
+          <span class="text-[10px] text-slate-500 mt-0.5" id="metricDeviationMax">Max Dev: 0.0 mm</span>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex flex-col">
+          <span class="text-[11px] text-slate-400 font-medium">軌道分類パターン</span>
+          <div class="mt-1">
+            <span id="metricPattern" class="px-1.5 py-0.5 rounded text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800">
+              直線・正常型
+            </span>
+          </div>
+          <span class="text-[10px] text-slate-500 mt-1" id="metricPatternSub">偏位度: 僅少</span>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex flex-col">
+          <span class="text-[11px] text-slate-400 font-medium">rPPG 心拍・自律神経</span>
+          <div class="flex items-baseline space-x-1 mt-1">
+            <span id="metricHr" class="text-2xl font-bold font-mono text-rose-400">--</span>
+            <span class="text-xs text-slate-500">bpm</span>
+          </div>
+          <span class="text-[10px] text-slate-500 mt-0.5" id="metricHrvStatus">自律神経緊張: 判定中</span>
+        </div>
+      </div>
+
+      <!-- Real-time 2D Motion Trajectory Chart (Frontal: Deviation vs Opening / Sagittal: Ant-Post vs Opening) -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-lg flex flex-col flex-1 min-h-[280px]">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+          <div class="flex items-center space-x-2">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300" id="trajectoryTitle">開口変位 2D軌道プロット (正面: X-Y)</h2>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">頭部動揺補正済み</span>
+          </div>
+          <div class="flex items-center space-x-1 text-[11px]">
+            <span class="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block"></span>
+            <span class="text-slate-400">現ストローク</span>
+            <span class="w-2.5 h-2.5 rounded-full bg-slate-600 inline-block ml-2"></span>
+            <span class="text-slate-400">基準正中</span>
+          </div>
+        </div>
+
+        <div class="flex-1 w-full relative pt-2">
+          <canvas id="trajectoryChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Time-Series Velocity & Displacement Chart -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-lg h-[180px] flex flex-col">
+        <div class="flex items-center justify-between pb-1.5 border-b border-slate-800">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300">開口量・運動速度 時系列プロファイル</h2>
+          <span class="text-[10px] text-slate-400 font-mono" id="timeProfileStats">平滑性 (Jerk Index): --</span>
+        </div>
+        <div class="flex-1 w-full relative pt-1">
+          <canvas id="timeSeriesChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Export & Clinic Integration Suite -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-2">
+        <div class="text-xs text-slate-400">
+          <span class="font-semibold text-slate-300">姿勢・カルテ連携:</span>
+          <span>JSON/CSVで他システムへ即時受渡可能</span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <button id="btnExportCsv" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition flex items-center space-x-1">
+            <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.5L19 7.5V19a2 2 0 01-2 2z"/></svg>
+            <span>CSV出力</span>
+          </button>
+          <button id="btnExportReport" class="px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium transition flex items-center space-x-1 shadow-md shadow-cyan-900/30">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+            <span>患者説明シート印刷</span>
+          </button>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <footer class="border-t border-slate-800/80 bg-slate-950 px-4 py-2 text-center text-[11px] text-slate-500">
+    【薬機法に関する表示】本ツールは医療機器プログラム（SaMD）ではありません。顎顔面運動の動的幾何データ可視化、患者インフォームドコンセントおよびバイオフィードバック運動指導を目的とした教育・研究支援ソフトウェアです。
+  </footer>
+
+  <!-- ========================================================================= -->
+  <!-- JAVASCRIPT: ARCHITECTURE, TRACKING, HEAD COMPENSATION & RPPG MODULES     -->
+  <!-- ========================================================================= -->
+  <script>
+    // Anatomical Landmark Reference Indices (MediaPipe Face Mesh)
+    const LANDMARKS = {
+      NASION: 168,            // 鼻根点 (固定基準点)
+      MID_FOREHEAD: 10,       // 額中央 (rPPG ROI)
+      CHIN_MENTON: 152,       // オトガイ点下端 (可動点)
+      LOWER_INCISOR_LIP: 17,  // 下唇中央下縁 (切歯点近似)
+      UPPER_INCISOR_LIP: 0,   // 上唇中央上縁 (上顎基準)
+      RIGHT_CANTHUS: 133,     // 右内眼角 (水平軸・IPD)
+      LEFT_CANTHUS: 362,      // 左内眼角 (水平軸・IPD)
+      RIGHT_IRIS: 468,        // 右瞳孔中心
+      LEFT_IRIS: 473,         // 左瞳孔中心
+      RIGHT_TRAGUS_APPROX: 234, // 耳前部外側 (側面観基準)
+      GONION_APPROX: 172       // 下顎角近傍
+    };
+
+    // Global Application State
+    const AppState = {
+      viewMode: 'frontal',       // 'frontal' or 'sagittal'
+      activeTrackingIndex: LANDMARKS.CHIN_MENTON,
+      userIpdMm: 63.0,          // Interpupillary Distance in mm
+      pixelPerMm: 1.0,           // Calibration factor
+      isRecording: false,
+      showBiofeedback: true,
+      
+      // Zero-reference baseline coordinates (Head local coordinate space)
+      baselineRestPos: null,     // { x: 0, y: 0 }
+      
+      // Recorded trajectory buffer
+      currentStroke: [],         // Array of { time, localX, localY, verticalMm, devMm, velocity }
+      historyStrokes: [],        // Saved strokes
+      
+      // Metrics
+      maxVerticalMm: 0,
+      maxDeviationMm: 0,
+      terminalDeflectionMm: 0,
+      
+      // Performance
+      lastFrameTime: performance.now(),
+      fps: 0
+    };
+
+    /**
+     * rPPG Signal Extractor:
+     * Samples the Green-channel intensity of a stable forehead ROI (Landmark #10),
+     * applies temporal bandpass filtering (0.7 Hz - 3.5 Hz: 42 - 210 BPM),
+     * and estimates heart rate & pulse signal.
+     */
+    class RPPGProcessor {
+      constructor(bufferSize = 128, sampleRate = 30) {
+        this.bufferSize = bufferSize;
+        this.sampleRate = sampleRate;
+        this.rawSignal = [];
+        this.timestamps = [];
+        this.filteredSignal = [];
+        this.estimatedBpm = null;
+        this.lastPeakTimes = [];
+      }
+
+      // Extract mean green value from forehead polygon
+      processFrame(ctx, foreheadLandmark, width, height) {
+        if (!foreheadLandmark) return;
+
+        // Bounding box around forehead (15x15 pixel region)
+        const fx = Math.floor(foreheadLandmark.x * width);
+        const fy = Math.floor(foreheadLandmark.y * height) - 15; // Shift slightly upward to forehead
+        const roiSize = 20;
+
+        if (fx - roiSize/2 < 0 || fx + roiSize/2 >= width || fy - roiSize/2 < 0 || fy + roiSize/2 >= height) {
+          return;
+        }
+
+        try {
+          const imgData = ctx.getImageData(fx - roiSize/2, fy - roiSize/2, roiSize, roiSize);
+          const data = imgData.data;
+          let sumG = 0;
+          const pixelCount = data.length / 4;
+          for (let i = 0; i < data.length; i += 4) {
+            sumG += data[i + 1]; // Green component
+          }
+          const meanG = sumG / pixelCount;
+          const now = performance.now();
+
+          this.rawSignal.push(meanG);
+          this.timestamps.push(now);
+
+          if (this.rawSignal.length > this.bufferSize) {
+            this.rawSignal.shift();
+            this.timestamps.shift();
+          }
+
+          // Simple bandpass & moving average filtering
+          this.computePulse();
+        } catch (e) {
+          // Canvas read error safety
+        }
+      }
+
+      computePulse() {
+        if (this.rawSignal.length < 32) return;
+
+        // Moving baseline subtraction (High-pass)
+        const mean = this.rawSignal.reduce((a, b) => a + b, 0) / this.rawSignal.length;
+        const detrended = this.rawSignal.map(v => v - mean);
+
+        // Simple 3-point smoothing (Low-pass)
+        const smoothed = [];
+        for (let i = 1; i < detrended.length - 1; i++) {
+          smoothed.push((detrended[i-1] + detrended[i]*2 + detrended[i+1]) / 4);
+        }
+        this.filteredSignal = smoothed;
+
+        // Peak detection for heart rate
+        let peaks = 0;
+        const n = this.filteredSignal.length;
+        for (let i = 2; i < n - 2; i++) {
+          if (this.filteredSignal[i] > 0 &&
+              this.filteredSignal[i] > this.filteredSignal[i - 1] &&
+              this.filteredSignal[i] > this.filteredSignal[i + 1]) {
+            peaks++;
+          }
+        }
+
+        // Estimate BPM based on buffer duration
+        const durationSec = (this.timestamps[this.timestamps.length - 1] - this.timestamps[0]) / 1000;
+        if (durationSec > 2 && peaks > 1) {
+          const rawBpm = (peaks / durationSec) * 60;
+          if (rawBpm >= 45 && rawBpm <= 160) {
+            this.estimatedBpm = this.estimatedBpm ? Math.round(this.estimatedBpm * 0.8 + rawBpm * 0.2) : Math.round(rawBpm);
+          }
+        }
+      }
+
+      drawPulseWave(canvas) {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        if (this.filteredSignal.length < 2) return;
+
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+
+        const step = w / this.filteredSignal.length;
+        const maxAmp = Math.max(...this.filteredSignal.map(Math.abs), 0.5);
+
+        for (let i = 0; i < this.filteredSignal.length; i++) {
+          const val = this.filteredSignal[i];
+          const y = (h / 2) - (val / maxAmp) * (h * 0.4);
+          const x = i * step;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+
+    /**
+     * Head Coordinate Transformer:
+     * Calculates the head's local coordinate frame using rigid facial landmarks:
+     * - Origin: Nasion (#168)
+     * - X-axis: Line connecting Right Canthus (#133) and Left Canthus (#362)
+     * - Y-axis: Perpendicular down through facial midline
+     * Projecting any dynamic target (Chin #152) into this frame cancels out head nods,
+     * tilts, and sway.
+     */
+    function calculateHeadLocalCoords(landmarks, targetIdx, width, height, ipdMm) {
+      const nasion = landmarks[LANDMARKS.NASION];
+      const rEye = landmarks[LANDMARKS.RIGHT_CANTHUS];
+      const lEye = landmarks[LANDMARKS.LEFT_CANTHUS];
+      const target = landmarks[targetIdx];
+
+      if (!nasion || !rEye || !lEye || !target) return null;
+
+      // Pixel coordinates
+      const pNas = { x: nasion.x * width, y: nasion.y * height };
+      const pREye = { x: rEye.x * width, y: rEye.y * height };
+      const pLEye = { x: lEye.x * width, y: lEye.y * height };
+      const pTgt = { x: target.x * width, y: target.y * height };
+
+      // IPD in pixels (for mm conversion)
+      const ipdPixels = Math.hypot(pLEye.x - pREye.x, pLEye.y - pREye.y);
+      const pxPerMm = ipdPixels / (ipdMm || 63.0);
+
+      // Head roll angle (rotation of eye-line relative to camera horizontal)
+      const dxEyes = pLEye.x - pREye.x;
+      const dyEyes = pLEye.y - pREye.y;
+      const headRollRad = Math.atan2(dyEyes, dxEyes);
+
+      // Vector from Nasion (Origin) to Target
+      const vx = pTgt.x - pNas.x;
+      const vy = pTgt.y - pNas.y;
+
+      // Rotate vector by -headRollRad to align with head's local coordinate frame
+      const cosR = Math.cos(-headRollRad);
+      const sinR = Math.sin(-headRollRad);
+
+      const localX_px = vx * cosR - vy * sinR;
+      const localY_px = vx * sinR + vy * cosR;
+
+      // Convert to mm
+      const localX_mm = localX_px / pxPerMm;
+      const localY_mm = localY_px / pxPerMm;
+
+      return {
+        pxPerMm,
+        headRollDeg: (headRollRad * 180 / Math.PI),
+        origin: pNas,
+        eyeVector: { dx: dxEyes, dy: dyEyes },
+        targetRaw: pTgt,
+        localX_mm,
+        localY_mm,
+        localX_px,
+        localY_px
+      };
+    }
+
+    let trajectoryChart = null;
+    let timeSeriesChart = null;
+
+    function initCharts() {
+      // 1. 2D Motion Trajectory Chart
+      const ctxTraj = document.getElementById('trajectoryChart').getContext('2d');
+      trajectoryChart = new Chart(ctxTraj, {
+        type: 'scatter',
+        data: {
+          datasets: [
+            {
+              label: '開口軌跡 (Stroke)',
+              data: [],
+              borderColor: '#22d3ee',
+              backgroundColor: '#22d3ee',
+              showLine: true,
+              borderWidth: 2.5,
+              pointRadius: 1.5,
+              tension: 0.1
+            },
+            {
+              label: '正中ガイド (Centerline)',
+              data: [{x: 0, y: 0}, {x: 0, y: 55}],
+              borderColor: 'rgba(100, 116, 139, 0.4)',
+              borderDash: [4, 4],
+              pointRadius: 0,
+              borderWidth: 1.5,
+              showLine: true
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            x: {
+              title: { display: true, text: '側方偏位 (Deviation X: mm)', color: '#94a3b8', font: { size: 10 } },
+              grid: { color: 'rgba(51, 65, 85, 0.4)' },
+              ticks: { color: '#94a3b8', font: { size: 10 } },
+              min: -20,
+              max: 20
+            },
+            y: {
+              title: { display: true, text: '垂直開口変位 (Depression Y: mm)', color: '#94a3b8', font: { size: 10 } },
+              grid: { color: 'rgba(51, 65, 85, 0.4)' },
+              ticks: { color: '#94a3b8', font: { size: 10 } },
+              reverse: true, // Downward opening is depicted downwards
+              min: 0,
+              max: 55
+            }
+          },
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+
+      // 2. Time-series Displacement & Velocity
+      const ctxTime = document.getElementById('timeSeriesChart').getContext('2d');
+      timeSeriesChart = new Chart(ctxTime, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [
+            {
+              label: '垂直開口 (mm)',
+              data: [],
+              borderColor: '#38bdf8',
+              backgroundColor: 'rgba(56, 189, 248, 0.1)',
+              borderWidth: 1.8,
+              fill: true,
+              yAxisID: 'y'
+            },
+            {
+              label: '偏位幅 (mm)',
+              data: [],
+              borderColor: '#f59e0b',
+              borderWidth: 1.5,
+              fill: false,
+              yAxisID: 'y'
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            x: {
+              display: false
+            },
+            y: {
+              grid: { color: 'rgba(51, 65, 85, 0.3)' },
+              ticks: { color: '#94a3b8', font: { size: 9 } },
+              min: 0,
+              suggestedMax: 45
+            }
+          },
+          plugins: {
+            legend: {
+              labels: { color: '#cbd5e1', font: { size: 10 } }
+            }
+          }
+        }
+      });
+    }
+
+    const rppgEngine = new RPPGProcessor(128, 30);
+    const videoElement = document.getElementById('inputVideo');
+    const canvasElement = document.getElementById('outputCanvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const rppgCanvas = document.getElementById('rppgMiniCanvas');
+
+    // Biomechanical Pattern Classifier
+    function classifyTMJPattern(maxVert, maxDev, endDev) {
+      if (maxVert < 15) {
+        return { label: '未測定 / 微小開口', sub: '十分開口してください', color: 'bg-slate-800 text-slate-300' };
+      }
+      // Deviation (S-curve): temporary deviation that returns to center (< 1.8 mm at maximum opening)
+      if (maxDev >= 3.0 && Math.abs(endDev) < 2.0) {
+        return { label: '偏位型 (Deviation)', sub: 'S字状・円板復位性転位疑い', color: 'bg-amber-950 text-amber-300 border-amber-800' };
+      }
+      // Deflection: lateral deviation remaining at maximum opening
+      if (Math.abs(endDev) >= 3.0) {
+        return { label: '偏向型 (Deflection)', sub: '終末側方偏倚・非復位性疑い', color: 'bg-rose-950 text-rose-300 border-rose-800' };
+      }
+      // Normal smooth opening
+      return { label: '直線・正常型', sub: '対称性開口 (偏位 < 2.5mm)', color: 'bg-emerald-950 text-emerald-300 border-emerald-800' };
+    }
+
+    function onFaceMeshResults(results) {
+      document.getElementById('loadingOverlay').classList.add('hidden');
+
+      // FPS calculation
+      const now = performance.now();
+      const delta = now - AppState.lastFrameTime;
+      AppState.lastFrameTime = now;
+      AppState.fps = Math.round(1000 / (delta || 33));
+      document.getElementById('hudFps').textContent = `FPS: ${AppState.fps}`;
+
+      // Canvas dimensions sync
+      if (canvasElement.width !== videoElement.videoWidth || canvasElement.height !== videoElement.videoHeight) {
+        canvasElement.width = videoElement.videoWidth;
+        canvasElement.height = videoElement.videoHeight;
+      }
+
+      const w = canvasElement.width;
+      const h = canvasElement.height;
+
+      // Draw original video frame
+      canvasCtx.save();
+      canvasCtx.drawImage(results.image, 0, 0, w, h);
+
+      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const landmarks = results.multiFaceLandmarks[0];
+
+        // 1. Process rPPG from forehead
+        rppgEngine.processFrame(canvasCtx, landmarks[LANDMARKS.MID_FOREHEAD], w, h);
+        rppgEngine.drawPulseWave(rppgCanvas);
+        if (rppgEngine.estimatedBpm) {
+          document.getElementById('hudBpm').textContent = `${rppgEngine.estimatedBpm} BPM`;
+          document.getElementById('metricHr').textContent = rppgEngine.estimatedBpm;
+          const status = rppgEngine.estimatedBpm > 90 ? '筋性・交感神経緊張' : 'リラックス・安定';
+          document.getElementById('metricHrvStatus').textContent = `自律神経: ${status}`;
+        }
+
+        // 2. Perform Head-Compensated Coordinate Transformation
+        const headGeom = calculateHeadLocalCoords(landmarks, AppState.activeTrackingIndex, w, h, AppState.userIpdMm);
+
+        if (headGeom) {
+          AppState.pixelPerMm = headGeom.pxPerMm;
+          document.getElementById('hudScale').textContent = `Scale: ${headGeom.pxPerMm.toFixed(2)} px/mm`;
+          document.getElementById('hudHeadTilt').textContent = `Head Tilt: ${headGeom.headRollDeg.toFixed(1)}°`;
+
+          // Establish resting baseline on first frame or on demand
+          if (!AppState.baselineRestPos) {
+            AppState.baselineRestPos = {
+              x: headGeom.localX_mm,
+              y: headGeom.localY_mm
+            };
+          }
+
+          // Relative displacement from rest in head coordinate space
+          const currentDevMm = headGeom.localX_mm - AppState.baselineRestPos.x;     // Lateral (Left/Right)
+          const currentVerticalMm = headGeom.localY_mm - AppState.baselineRestPos.y; // Vertical opening
+
+          // Update Realtime Metric Numbers
+          document.getElementById('metricVerticalDisp').textContent = Math.max(0, currentVerticalMm).toFixed(1);
+          document.getElementById('metricDeviation').textContent = Math.abs(currentDevMm).toFixed(1);
+
+          // Update Max values during stroke
+          if (AppState.isRecording) {
+            if (currentVerticalMm > AppState.maxVerticalMm) AppState.maxVerticalMm = currentVerticalMm;
+            if (Math.abs(currentDevMm) > AppState.maxDeviationMm) AppState.maxDeviationMm = Math.abs(currentDevMm);
+            AppState.terminalDeflectionMm = currentDevMm;
+
+            document.getElementById('metricVerticalMax').textContent = `Max: ${AppState.maxVerticalMm.toFixed(1)} mm`;
+            document.getElementById('metricDeviationMax').textContent = `Max Dev: ${AppState.maxDeviationMm.toFixed(1)} mm`;
+
+            // Classify pattern
+            const classification = classifyTMJPattern(AppState.maxVerticalMm, AppState.maxDeviationMm, AppState.terminalDeflectionMm);
+            const patEl = document.getElementById('metricPattern');
+            patEl.className = `px-1.5 py-0.5 rounded text-xs font-semibold ${classification.color}`;
+            patEl.textContent = classification.label;
+            document.getElementById('metricPatternSub').textContent = classification.sub;
+
+            // Push to current stroke
+            AppState.currentStroke.push({
+              time: now,
+              x: currentDevMm,
+              y: currentVerticalMm
+            });
+
+            // Update Trajectory chart every 2 frames
+            if (AppState.currentStroke.length % 2 === 0) {
+              const plotData = AppState.currentStroke.map(p => ({ x: Number(p.x.toFixed(2)), y: Number(p.y.toFixed(2)) }));
+              trajectoryChart.data.datasets[0].data = plotData;
+              trajectoryChart.update();
+
+              // Update Time-series chart
+              const timeDataY = plotData.slice(-30).map(p => p.y);
+              const timeDataDev = plotData.slice(-30).map(p => Math.abs(p.x));
+              timeSeriesChart.data.labels = timeDataY.map((_, i) => i);
+              timeSeriesChart.data.datasets[0].data = timeDataY;
+              timeSeriesChart.data.datasets[1].data = timeDataDev;
+              timeSeriesChart.update();
+            }
+          }
+
+          // 3. Render Visual Overlay on Canvas
+          drawMeasurementHUD(canvasCtx, landmarks, headGeom, w, h);
+        }
+      }
+      canvasCtx.restore();
+    }
+
+    function drawMeasurementHUD(ctx, landmarks, geom, w, h) {
+      // Draw Forehead rPPG Region of Interest (ROI)
+      const fore = landmarks[LANDMARKS.MID_FOREHEAD];
+      if (fore) {
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.5;
+        const fx = fore.x * w;
+        const fy = fore.y * h - 15;
+        ctx.strokeRect(fx - 10, fy - 10, 20, 20);
+        ctx.fillStyle = 'rgba(244, 63, 94, 0.2)';
+        ctx.fillRect(fx - 10, fy - 10, 20, 20);
+      }
+
+      // Draw Head Reference Coordinate Frame (Nasion Origin & Eye Axis)
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(geom.origin.x, geom.origin.y, 4, 0, 2 * Math.PI);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fill();
+
+      // Eye line (Canthi)
+      const rEye = landmarks[LANDMARKS.RIGHT_CANTHUS];
+      const lEye = landmarks[LANDMARKS.LEFT_CANTHUS];
+      ctx.beginPath();
+      ctx.moveTo(rEye.x * w, rEye.y * h);
+      ctx.lineTo(lEye.x * w, lEye.y * h);
+      ctx.stroke();
+
+      // Biofeedback Target Centerline (Straight Opening Corridor)
+      if (AppState.showBiofeedback) {
+        ctx.save();
+        ctx.translate(geom.origin.x, geom.origin.y);
+        ctx.rotate(geom.headRollDeg * Math.PI / 180);
+
+        // Center line
+        ctx.strokeStyle = 'rgba(34, 197, 94, 0.4)';
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, 280);
+        ctx.stroke();
+
+        // Safe corridor zone (±2.5mm translated to pixels)
+        const tolPx = 2.5 * geom.pxPerMm;
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.07)';
+        ctx.fillRect(-tolPx, 40, tolPx * 2, 240);
+        ctx.restore();
+      }
+
+      // Tracking Target Marker (e.g. Chin #152)
+      ctx.beginPath();
+      ctx.arc(geom.targetRaw.x, geom.targetRaw.y, 6, 0, 2 * Math.PI);
+      ctx.fillStyle = '#22d3ee';
+      ctx.shadowColor = '#06b6d4';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Draw live trajectory trace on video canvas
+      if (AppState.currentStroke.length > 1) {
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (let i = 0; i < AppState.currentStroke.length; i++) {
+          const pt = AppState.currentStroke[i];
+          // Re-project local mm to video pixel space relative to origin
+          const rollRad = geom.headRollDeg * Math.PI / 180;
+          const xPx = (pt.x + (AppState.baselineRestPos ? AppState.baselineRestPos.x : 0)) * geom.pxPerMm;
+          const yPx = (pt.y + (AppState.baselineRestPos ? AppState.baselineRestPos.y : 0)) * geom.pxPerMm;
+          
+          const rx = xPx * Math.cos(rollRad) - yPx * Math.sin(rollRad) + geom.origin.x;
+          const ry = xPx * Math.sin(rollRad) + yPx * Math.cos(rollRad) + geom.origin.y;
+
+          if (i === 0) ctx.moveTo(rx, ry);
+          else ctx.lineTo(rx, ry);
+        }
+        ctx.stroke();
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initCharts();
+
+      // Helper function for non-blocking in-app toasts
+      function showToast(message, duration = 3000) {
+        const toast = document.getElementById('toastBox');
+        const msg = document.getElementById('toastMsg');
+        msg.textContent = message;
+        toast.classList.remove('hidden');
+        toast.style.opacity = '1';
+        setTimeout(() => {
+          toast.style.opacity = '0';
+          setTimeout(() => toast.classList.add('hidden'), 300);
+        }, duration);
+      }
+
+      // Initialize FaceMesh
+      const faceMesh = new FaceMesh({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+      });
+
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+
+      faceMesh.onResults(onFaceMeshResults);
+
+      // Safe Camera Controller
+      let camera = null;
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      const loadingSpinner = document.getElementById('loadingSpinner');
+      const cameraStatusIcon = document.getElementById('cameraStatusIcon');
+      const loadingTitle = document.getElementById('loadingTitle');
+      const loadingDesc = document.getElementById('loadingDesc');
+      const btnStartCamera = document.getElementById('btnStartCamera');
+
+      async function initializeCamera() {
+        loadingSpinner.classList.remove('hidden');
+        cameraStatusIcon.classList.add('hidden');
+        loadingTitle.textContent = 'カメラ初期化中...';
+        loadingDesc.textContent = '映像入力を取得しています。ブラウザのアクセス要求で「許可」を選択してください。';
+        btnStartCamera.classList.add('hidden');
+
+        try {
+          if (!camera) {
+            camera = new Camera(videoElement, {
+              onFrame: async () => {
+                await faceMesh.send({ image: videoElement });
+              },
+              width: 1280,
+              height: 720
+            });
+          }
+          await camera.start();
+          // Upon successful start, overlay is hidden in onFaceMeshResults
+        } catch (err) {
+          console.warn('Camera access permission issue:', err);
+          loadingSpinner.classList.add('hidden');
+          cameraStatusIcon.classList.remove('hidden');
+          loadingTitle.textContent = 'カメラへのアクセスが必要です';
+          loadingDesc.textContent = 'カメラ使用がブロックまたは保留されました。ブラウザのアドレスバー設定でカメラを許可し、再試行してください。';
+          btnStartCamera.textContent = 'カメラ接続を再試行';
+          btnStartCamera.classList.remove('hidden');
+          showToast('カメラのアクセスが拒否・保留されました。ボタンから再試行してください。');
+        }
+      }
+
+      // Trigger on user click
+      btnStartCamera.addEventListener('click', initializeCamera);
+
+      // Attempt initial start with promise error rejection catch
+      initializeCamera();
+
+      // Toggle Record
+      const btnRecord = document.getElementById('btnRecordToggle');
+      const recordLed = document.getElementById('recordLed');
+      const recordLabel = document.getElementById('recordLabel');
+
+      btnRecord.addEventListener('click', () => {
+        AppState.isRecording = !AppState.isRecording;
+        if (AppState.isRecording) {
+          // Reset Stroke
+          AppState.currentStroke = [];
+          AppState.maxVerticalMm = 0;
+          AppState.maxDeviationMm = 0;
+          recordLed.className = 'w-2 h-2 rounded-full bg-rose-300 animate-ping';
+          recordLabel.textContent = '計測中 (停止)';
+          btnRecord.className = 'px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs flex items-center space-x-1.5 shadow-md transition';
+        } else {
+          recordLed.className = 'w-2 h-2 rounded-full bg-white';
+          recordLabel.textContent = '記録開始';
+          btnRecord.className = 'px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs flex items-center space-x-1.5 shadow-md transition';
+        }
+      });
+
+      // Clear Trajectory
+      document.getElementById('btnResetTrack').addEventListener('click', () => {
+        AppState.currentStroke = [];
+        AppState.maxVerticalMm = 0;
+        AppState.maxDeviationMm = 0;
+        AppState.baselineRestPos = null;
+        trajectoryChart.data.datasets[0].data = [];
+        trajectoryChart.update();
+        timeSeriesChart.data.labels = [];
+        timeSeriesChart.data.datasets[0].data = [];
+        timeSeriesChart.data.datasets[1].data = [];
+        timeSeriesChart.update();
+        document.getElementById('metricVerticalDisp').textContent = '0.0';
+        document.getElementById('metricDeviation').textContent = '0.0';
+        document.getElementById('metricVerticalMax').textContent = 'Max: 0.0 mm';
+        document.getElementById('metricDeviationMax').textContent = 'Max Dev: 0.0 mm';
+        showToast('軌跡と測定データをリセットしました');
+      });
+
+      // Tracking Point Selector
+      const selectPoint = document.getElementById('selectTrackingPoint');
+      const inputCustom = document.getElementById('inputCustomPoint');
+      selectPoint.addEventListener('change', (e) => {
+        if (e.target.value === 'custom') {
+          inputCustom.classList.remove('hidden');
+        } else {
+          inputCustom.classList.add('hidden');
+          AppState.activeTrackingIndex = parseInt(e.target.value, 10);
+          AppState.baselineRestPos = null;
+        }
+      });
+      inputCustom.addEventListener('input', (e) => {
+        const val = parseInt(e.target.value, 10);
+        if (!isNaN(val) && val >= 0 && val <= 467) {
+          AppState.activeTrackingIndex = val;
+          AppState.baselineRestPos = null;
+        }
+      });
+
+      // Calibrate Button
+      document.getElementById('btnCalibrate').addEventListener('click', () => {
+        const val = parseFloat(document.getElementById('inputIpdMm').value);
+        if (!isNaN(val) && val > 30) {
+          AppState.userIpdMm = val;
+          AppState.baselineRestPos = null; // Re-align
+          showToast(`瞳孔間距離 (IPD: ${val.toFixed(1)}mm) で再較正しました`);
+        }
+      });
+
+      // Biofeedback Toggle
+      document.getElementById('checkBiofeedback').addEventListener('change', (e) => {
+        AppState.showBiofeedback = e.target.checked;
+      });
+
+      // Frontal vs Sagittal Toggle
+      const btnFront = document.getElementById('btnViewFrontal');
+      const btnSag = document.getElementById('btnViewSagittal');
+      btnFront.addEventListener('click', () => {
+        AppState.viewMode = 'frontal';
+        btnFront.className = 'px-3 py-1.5 text-xs font-medium rounded-md bg-cyan-600 text-white shadow-sm transition';
+        btnSag.className = 'px-3 py-1.5 text-xs font-medium rounded-md text-slate-400 hover:text-white transition';
+        document.getElementById('trajectoryTitle').textContent = '開口変位 2D軌道プロット (正面: X-Y)';
+        trajectoryChart.options.scales.x.title.text = '側方偏位 (Deviation X: mm)';
+        trajectoryChart.update();
+      });
+      btnSag.addEventListener('click', () => {
+        AppState.viewMode = 'sagittal';
+        btnSag.className = 'px-3 py-1.5 text-xs font-medium rounded-md bg-cyan-600 text-white shadow-sm transition';
+        btnFront.className = 'px-3 py-1.5 text-xs font-medium rounded-md text-slate-400 hover:text-white transition';
+        document.getElementById('trajectoryTitle').textContent = '開口変位 2D軌道プロット (矢状面: 前後Z - 垂直Y)';
+        trajectoryChart.options.scales.x.title.text = '前後移動 (Anterior/Posterior: mm)';
+        trajectoryChart.update();
+      });
+
+      // CSV Export
+      document.getElementById('btnExportCsv').addEventListener('click', () => {
+        if (AppState.currentStroke.length === 0) {
+          showToast('エクスポートする記録データがありません。まず「記録開始」を押して開口運動を行ってください。');
+          return;
+        }
+        let csv = "Timestamp(ms),LateralDeviation(mm),VerticalOpening(mm)\n";
+        AppState.currentStroke.forEach(pt => {
+          csv += `${pt.time.toFixed(1)},${pt.x.toFixed(3)},${pt.y.toFixed(3)}\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `TMJ_Motion_Data_${new Date().toISOString().slice(0, 19)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+
+      // Patient Explanation Sheet Print Report
+      document.getElementById('btnExportReport').addEventListener('click', () => {
+        window.print();
+      });
+    });
+  </script>
+</body>
+</html>
